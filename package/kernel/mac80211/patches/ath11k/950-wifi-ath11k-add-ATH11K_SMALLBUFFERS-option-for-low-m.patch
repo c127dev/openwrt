@@ -1,0 +1,126 @@
+From 6b7cab5fe844fe987e657edbd44d3af39cac0ed5 Mon Sep 17 00:00:00 2001
+From: Johan Alvarado <contact@c127.dev>
+Date: Thu, 11 Jun 2026 12:28:42 -0500
+Subject: [PATCH] wifi: ath11k: add ATH11K_SMALLBUFFERS option for low memory
+ systems
+
+The default data path ring sizes target platforms with 512 MB of RAM or
+more. On a 256 MB IPQ5018 access point the RX buffer pools and the TX
+completion rings alone cost about 38 MiB per pdev: 16 MiB for the 4096
+buffers of rx_refill_buf_ring, another 16 MiB for rxdma_mon_buf_ring,
+and 6 MiB for the 32768 entry TX completion rings of the 3 TCL rings.
+
+The monitor pool is pure waste when hw_params.supports_monitor is false:
+it is only drained under ATH11K_FLAG_MONITOR_STARTED, and that flag can
+never be set because ath11k_mac_register() does not expose the monitor
+interface type. Under the option, skip the replenish there, keeping the
+ring allocated and advertised to firmware, which reclaims ~16 MiB per
+pdev on its own. Everything outside the option keeps its old behaviour.
+
+Add CONFIG_ATH11K_SMALLBUFFERS which shrinks these rings:
+
+  ring                          default  small
+  DP_TX_COMP_RING_SIZE            32768   4096
+  DP_REO_DST_RING_SIZE             2048    512
+  DP_RXDMA_BUF_RING_SIZE           4096   1024
+  DP_RXDMA_MON_STATUS_RING_SIZE    1024    512
+  DP_RXDMA_MONITOR_BUF_RING_SIZE   4096    256
+  DP_RXDMA_MONITOR_DST_RING_SIZE   2048    512
+  DP_RXDMA_MONITOR_DESC_RING_SIZE  4096    512
+
+This saves roughly 25-30 MiB per radio. 1024 RX buffers and 4096 in
+flight TX descriptors per TCL ring are still above what a 2x2 802.11ax
+radio needs at line rate, so throughput is unaffected. Monitor mode
+still works where it is supported, but may drop frames under load.
+
+Signed-off-by: Johan Alvarado <contact@c127.dev>
+---
+diff --git a/drivers/net/wireless/ath/ath11k/Kconfig b/drivers/net/wireless/ath/ath11k/Kconfig
+index f8e2af0..65ba170 100644
+--- a/drivers/net/wireless/ath/ath11k/Kconfig
++++ b/drivers/net/wireless/ath/ath11k/Kconfig
+@@ -32,6 +32,17 @@ config ATH11K_PCI
+ 	help
+ 	  This module adds support for PCIE bus
+ 
++config ATH11K_SMALLBUFFERS
++	bool "ath11k reduced ring and buffer sizes for low memory systems"
++	depends on ATH11K
++	help
++	  Shrink the host data path rings and the RX buffer pools, saving
++	  25-30 MB of RAM per radio. Intended for systems with 256 MB or
++	  less, such as IPQ5018 based access points. Throughput is not
++	  affected, monitor mode may drop frames under load.
++
++	  If unsure, say N.
++
+ config ATH11K_DEBUG
+ 	bool "QCA ath11k debugging"
+ 	depends on ATH11K
+diff --git a/drivers/net/wireless/ath/ath11k/dp.h b/drivers/net/wireless/ath/ath11k/dp.h
+index 7a55afd..f730cd6 100644
+--- a/drivers/net/wireless/ath/ath11k/dp.h
++++ b/drivers/net/wireless/ath/ath11k/dp.h
+@@ -206,17 +206,34 @@ struct ath11k_pdev_dp {
+ #define DP_WBM_RELEASE_RING_SIZE	64
+ #define DP_TCL_DATA_RING_SIZE		512
+ #define DP_TCL_DATA_RING_SIZE_WCN6750	2048
++#ifdef CONFIG_ATH11K_SMALLBUFFERS
++#define DP_TX_COMP_RING_SIZE		4096
++#else
+ #define DP_TX_COMP_RING_SIZE		32768
++#endif
+ #define DP_TX_IDR_SIZE			DP_TX_COMP_RING_SIZE
+ #define DP_TCL_CMD_RING_SIZE		32
+ #define DP_TCL_STATUS_RING_SIZE		32
+ #define DP_REO_DST_RING_MAX		4
++#ifdef CONFIG_ATH11K_SMALLBUFFERS
++#define DP_REO_DST_RING_SIZE		512
++#else
+ #define DP_REO_DST_RING_SIZE		2048
++#endif
+ #define DP_REO_REINJECT_RING_SIZE	32
+ #define DP_RX_RELEASE_RING_SIZE		1024
+ #define DP_REO_EXCEPTION_RING_SIZE	128
+ #define DP_REO_CMD_RING_SIZE		256
+ #define DP_REO_STATUS_RING_SIZE		2048
++#ifdef CONFIG_ATH11K_SMALLBUFFERS
++#define DP_RXDMA_BUF_RING_SIZE		1024
++#define DP_RXDMA_REFILL_RING_SIZE	2048
++#define DP_RXDMA_ERR_DST_RING_SIZE	1024
++#define DP_RXDMA_MON_STATUS_RING_SIZE	512
++#define DP_RXDMA_MONITOR_BUF_RING_SIZE	256
++#define DP_RXDMA_MONITOR_DST_RING_SIZE	512
++#define DP_RXDMA_MONITOR_DESC_RING_SIZE	512
++#else
+ #define DP_RXDMA_BUF_RING_SIZE		4096
+ #define DP_RXDMA_REFILL_RING_SIZE	2048
+ #define DP_RXDMA_ERR_DST_RING_SIZE	1024
+@@ -224,6 +241,7 @@ struct ath11k_pdev_dp {
+ #define DP_RXDMA_MONITOR_BUF_RING_SIZE	4096
+ #define DP_RXDMA_MONITOR_DST_RING_SIZE	2048
+ #define DP_RXDMA_MONITOR_DESC_RING_SIZE	4096
++#endif
+ 
+ #define DP_RX_RELEASE_RING_NUM	3
+ 
+diff --git a/drivers/net/wireless/ath/ath11k/dp_rx.c b/drivers/net/wireless/ath/ath11k/dp_rx.c
+index 5666f66..f0492d3 100644
+--- a/drivers/net/wireless/ath/ath11k/dp_rx.c
++++ b/drivers/net/wireless/ath/ath11k/dp_rx.c
+@@ -501,7 +501,15 @@ static int ath11k_dp_rxdma_pdev_buf_setup(struct ath11k *ar)
+ 
+ 	ath11k_dp_rxdma_ring_buf_setup(ar, rx_ring, HAL_RXDMA_BUF);
+ 
++#ifdef CONFIG_ATH11K_SMALLBUFFERS
++	/* Without supports_monitor, ATH11K_FLAG_MONITOR_STARTED can never be
++	 * set and nothing ever drains this pool. Leave the ring allocated and
++	 * advertised to firmware, just empty.
++	 */
++	if (ab->hw_params.rxdma1_enable && ab->hw_params.supports_monitor) {
++#else
+ 	if (ar->ab->hw_params.rxdma1_enable) {
++#endif
+ 		rx_ring = &dp->rxdma_mon_buf_ring;
+ 		ath11k_dp_rxdma_ring_buf_setup(ar, rx_ring, HAL_RXDMA_MONITOR_BUF);
+ 	}
