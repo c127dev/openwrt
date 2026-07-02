@@ -13,6 +13,11 @@ PKG_FLAGS:=nonshared
 
 include $(INCLUDE_DIR)/package.mk
 
+define Build/Prepare
+	$(call Build/Prepare/Default)
+	$(if $(wildcard ./files/*),$(CP) ./files/* $(PKG_BUILD_DIR)/)
+endef
+
 define Build/Compile
 endef
 
@@ -69,6 +74,7 @@ ALLWIFIBOARDS:= \
 	meraki_mr30h \
 	meraki_underdog \
 	meraki_z3 \
+	mercusys_mr80x \
 	netgear_lbr20 \
 	netgear_rax120v2 \
 	netgear_rbk20 \
@@ -269,6 +275,7 @@ $(eval $(call generate-ipq-wifi-package,linksys_whw03,Linksys WHW03))
 $(eval $(call generate-ipq-wifi-package,meraki_mr30h,Meraki MR30H))
 $(eval $(call generate-ipq-wifi-package,meraki_underdog,Meraki underdog))
 $(eval $(call generate-ipq-wifi-package,meraki_z3,Meraki Z3))
+$(eval $(call generate-ipq-wifi-package,mercusys_mr80x,Mercusys MR80X v2))
 $(eval $(call generate-ipq-wifi-package,netgear_lbr20,Netgear LBR20))
 $(eval $(call generate-ipq-wifi-package,netgear_rax120v2,Netgear RAX120v2))
 $(eval $(call generate-ipq-wifi-package,netgear_rbk20,Netgear RBK20))
