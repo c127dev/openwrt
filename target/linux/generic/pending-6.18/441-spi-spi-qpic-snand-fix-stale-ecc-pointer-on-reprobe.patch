@@ -1,0 +1,64 @@
+From: Johan Alvarado <contact@c127.dev>
+Subject: [PATCH] spi: spi-qpic-snand: keep snandc->qspi->ecc in sync with the ECC ctx
+
+qcom_spi_ooblayout_ecc() and qcom_spi_ooblayout_free() read the ECC
+configuration through snandc->qspi->ecc, but that pointer is only ever
+assigned in qcom_spi_ecc_prepare_io_req_pipelined(), which runs on page
+I/O. qcom_spi_ecc_init_ctx_pipelined() installs the ooblayout without
+setting it and qcom_spi_ecc_cleanup_ctx_pipelined() frees the context
+without clearing it.
+
+spinand_init() calls mtd_ooblayout_count_freebytes() right after the ECC
+context is created, so the ooblayout runs before any page I/O has taken
+place. On a first probe the pointer is still NULL or stale; on a probe
+retry it points at the ecc_cfg that the previous attempt freed.
+
+A retry is easy to hit: on IPQ5018 the partitions come from the
+qcom,smem-part parser, which returns -EPROBE_DEFER until SMEM has
+probed, so the first spi-nand probe always defers and the second one
+runs against the freed context. When the slab has already been reused,
+qecc->steps holds garbage and
+
+  oobregion->length = qecc->steps * 4;
+
+goes negative, so mtd_ooblayout_count_bytes() hands that back as an
+error. spinand_init() then fails with a value that is not
+-EPROBE_DEFER, so the driver core never retries and the NAND never
+appears:
+
+  spi-nand spi0.0: ESMT SPI NAND was found.
+  spi-nand spi0.0: probe with driver spi-nand failed with error -512
+  UBI error: cannot open mtd rootfs, error -2
+  Waiting for root device /dev/ubiblock0_1...
+
+On a Mercusys MR80X (IPQ5018, ESMT F50L1G41LB) this bricked roughly half
+of the boots, the outcome depending on whether the freed memory had been
+overwritten yet.
+
+Set the pointer when the context is created and clear it when it is
+destroyed.
+
+Signed-off-by: Johan Alvarado <contact@c127.dev>
+---
+--- a/drivers/spi/spi-qpic-snand.c
++++ b/drivers/spi/spi-qpic-snand.c
+@@ -407,6 +407,8 @@ static int qcom_spi_ecc_init_ctx_pipeline
+ 	dev_dbg(snandc->dev, "ECC strength: %u bits per %u bytes\n",
+ 		ecc_cfg->strength, ecc_cfg->step_size);
+
++	snandc->qspi->ecc = ecc_cfg;
++
+ 	return 0;
+
+ err_free_ecc_cfg:
+@@ -416,8 +418,10 @@ err_free_ecc_cfg:
+
+ static void qcom_spi_ecc_cleanup_ctx_pipelined(struct nand_device *nand)
+ {
++	struct qcom_nand_controller *snandc = nand_to_qcom_snand(nand);
+ 	struct qpic_ecc *ecc_cfg = nand_to_ecc_ctx(nand);
+
++	snandc->qspi->ecc = NULL;
+ 	kfree(ecc_cfg);
+ }
+
