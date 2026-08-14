@@ -1,0 +1,19 @@
+#!/bin/sh
+# VM tuning for the Mercusys MR80X (IPQ5018, 256MB).
+
+. /lib/functions.sh
+
+[ "$(board_name)" = "mercusys,mr80x-v2" ] || exit 0
+
+cat > /etc/sysctl.d/99-mr80x.conf <<'EOF'
+# Reserve for the GFP_ATOMIC skbs of the ath11k RX softirq path.
+# Do not go below ~8192.
+vm.min_free_kbytes=10240
+# Boosting can raise the zone watermarks by up to 22.5MB here, a fifth of
+# usable RAM, and nothing on this board needs high-order allocations.
+vm.watermark_boost_factor=0
+EOF
+
+sysctl -p /etc/sysctl.d/99-mr80x.conf >/dev/null 2>&1
+
+exit 0
