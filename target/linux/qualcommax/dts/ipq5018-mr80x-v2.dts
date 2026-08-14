@@ -218,6 +218,10 @@
 	};
 };
 
+&pcie0_phy {
+	status = "okay";
+};
+
 &sleep_clk {
 	clock-frequency = <32000>;
 };
@@ -336,22 +340,15 @@
 	};
 };
 
-/*
- * q6_region size (48MB) is already set by ipq5018-qcn6122.dtsi.
- *
- * ath11k Wi-Fi consumes too large memory spaces and too few spaces are
- * available for users. To prevent OOM when using LuCI or other softwares,
- * disable Wi-Fi related peripherals at the moment.
- */
-&q6v5_wcss {
-	status = "disabled";
+/* q6_region size (48MB) is already set by ipq5018-qcn6122.dtsi */
 
+&q6v5_wcss {
 	boot-args = <0x2 0x4 0x2 0x1b 0x0 0x0>;
 	/* pcie:1, len:4, updid:2, reset:gpio27 */
 };
 
 &wifi {
-	status = "disabled";
+	status = "okay";
 
 	qcom,rproc = <&q6_wcss_pd1>;
 	qcom,ath11k-fw-memory-mode = <2>;
@@ -362,7 +359,7 @@
 };
 
 &wifi1 {
-	status = "disabled";
+	status = "okay";
 
 	qcom,rproc = <&q6_wcss_pd2>;
 	qcom,userpd-subsys-name = "q6v5_wcss_userpd2";
@@ -371,5 +368,5 @@
 	qcom,m3-dump-addr = <0x4df00000>;
 	qcom,ath11k-calibration-variant = "Mercusys-MR80X-v2";
 
-	ieee80211-freq-limit = <5150000 5730000>;
+	ieee80211-freq-limit = <5150000 5835000>;
 };
