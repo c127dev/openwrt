@@ -224,7 +224,10 @@ define Device/mercusys_mr80x-v2
 	NAND_SIZE := 128m
 	KERNEL_IN_UBI := 1
 	IMAGE_SIZE := 43008k
-	DEVICE_PACKAGES := kmod-dsa-rtl8365mb
+	DEVICE_PACKAGES := ath11k-firmware-ipq5018-qcn6122 \
+		ipq-wifi-mercusys_mr80x-v2 \
+		kmod-ath11k-smallbuffers -kmod-ath11k \
+		kmod-dsa-rtl8365mb
 	IMAGES += factory.bin
 	IMAGE/factory.bin := append-ubi | check-size | mercusys-fwup MR80X
 	MERCUSYS_SUPPORT_STRING := SupportList:\n \
