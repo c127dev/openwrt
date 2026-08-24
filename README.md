@@ -40,6 +40,10 @@ Inputs: `source_ref` (branch or sha), `config` (file under `configs/`),
 The image is pushed to `ghcr.io/c127dev/openwrt-compiler`. Release tags are
 `vYYYY.MM.DD.<run>`, UTC.
 
+Set repository secrets `DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN` to also
+push `docker.io/<user>/openwrt-compiler`. With either unset the step logs
+`ghcr.io only` and the run continues.
+
 ## Adding a config
 
 ```bash

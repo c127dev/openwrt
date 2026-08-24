@@ -69,14 +69,45 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      # secrets is not available in a job-level if, so the tag list is
+      # built here and Docker Hub drops out when the secrets are unset.
+      - name: Tag list
+        id: tags
+        env:
+          USER: ${{ secrets.DOCKERHUB_USERNAME }}
+          TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          hub=false
+          if [ -n "${USER:-}" ] && [ -n "${TOKEN:-}" ]; then
+            hub=true
+          else
+            echo "DOCKERHUB_USERNAME or DOCKERHUB_TOKEN unset, ghcr.io only"
+          fi
+          echo "hub=$hub" >> "$GITHUB_OUTPUT"
+          {
+            echo 'list<<EOF'
+            echo "${{ needs.plan.outputs.image }}"
+            echo "$IMAGE:latest"
+            if [ "$hub" = true ]; then
+              echo "docker.io/$USER/openwrt-compiler:${{ needs.plan.outputs.tag }}"
+              echo "docker.io/$USER/openwrt-compiler:latest"
+            fi
+            echo EOF
+          } >> "$GITHUB_OUTPUT"
+
+      - uses: docker/login-action@v3
+        if: steps.tags.outputs.hub == 'true'
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
       - uses: docker/build-push-action@v6
         with:
           context: .packaging
           file: .packaging/Dockerfile
           push: true
-          tags: |
-            ${{ needs.plan.outputs.image }}
-            ${{ env.IMAGE }}:latest
+          tags: ${{ steps.tags.outputs.list }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
