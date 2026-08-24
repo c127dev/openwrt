@@ -7,13 +7,13 @@ Container image and firmware build for this fork.
 ```bash
 git clone https://github.com/c127dev/openwrt.git
 cd openwrt
-git checkout mercusys-mr80x-v220-wired
+git checkout mercusys-mr80x-v2-wired
 git worktree add .packaging compiler
 
 podman build -t openwrt-compiler .packaging
 podman run --rm --user build -v "$PWD:/work:z" -w /work openwrt-compiler bash -c '
   ./scripts/feeds update -a && ./scripts/feeds install -a &&
-  cp .packaging/configs/mr80x-v220-wired.diffconfig .config &&
+  cp .packaging/configs/mr80x-v2-wired.diffconfig .config &&
   make defconfig && make -j"$(nproc)"'
 ```
 
@@ -29,7 +29,7 @@ curl -X POST \
     -H "Authorization: Bearer $GH_TOKEN" \
     -H "X-GitHub-Api-Version: 2022-11-28" \
     https://api.github.com/repos/c127dev/openwrt/actions/workflows/build.yml/dispatches \
-    -d '{"ref":"compiler","inputs":{"source_ref":"mercusys-mr80x-v220-wired"}}'
+    -d '{"ref":"compiler","inputs":{"source_ref":"mercusys-mr80x-v2-wired"}}'
 ```
 
 204 means accepted. Token: fine-grained, this repo, Actions read and write.
