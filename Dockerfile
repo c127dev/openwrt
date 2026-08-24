@@ -10,7 +10,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 	libelf-dev libpython3-dev jq \
 	&& rm -rf /var/lib/apt/lists/*
 
-# OpenWrt buildroot refuses to run as root.
-RUN useradd -m -u 1000 build
-USER build
+# Buildroot refuses to run as root, but a container job must start as root
+# or the runner's own files under /__w are unwritable. The workflow drops to
+# this user for make.
+RUN useradd -m -u 1000 -s /bin/bash build
 WORKDIR /work

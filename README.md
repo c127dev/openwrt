@@ -11,7 +11,7 @@ git checkout mercusys-mr80x-v220-wired
 git worktree add .packaging compiler
 
 podman build -t openwrt-compiler .packaging
-podman run --rm -v "$PWD:/work:z" -w /work openwrt-compiler bash -c '
+podman run --rm --user build -v "$PWD:/work:z" -w /work openwrt-compiler bash -c '
   ./scripts/feeds update -a && ./scripts/feeds install -a &&
   cp .packaging/configs/mr80x-v220-wired.diffconfig .config &&
   make defconfig && make -j"$(nproc)"'
