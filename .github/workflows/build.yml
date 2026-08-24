@@ -41,13 +41,30 @@ jobs:
           fetch-depth: 0
 
       - id: p
+        env:
+          SOURCE_REF: ${{ inputs.source_ref }}
         run: |
           set -euo pipefail
           sha=$(git rev-parse HEAD)
+          # The branch name goes in the tag so a release states which
+          # source branch it was built from. A sha input names no branch,
+          # so look one up that contains it before falling back to the
+          # raw input. Only the characters a git tag and a docker tag
+          # both accept survive.
+          name="$SOURCE_REF"
+          if printf '%s' "$name" | grep -Eq '^[0-9a-f]{7,40}$'; then
+            name=$(git branch -r --contains "$sha" --format '%(refname:lstrip=3)' \
+                   | grep -v '^HEAD$' | head -n1)
+            name="${name:-$SOURCE_REF}"
+          fi
+          slug=$(printf '%s' "$name" | tr -c 'A-Za-z0-9._-' '-' | sed 's/^[.-]*//;s/[.-]*$//')
+          tag="v$(date -u +%Y.%m.%d).${{ github.run_number }}"
+          if [ -n "$slug" ]; then
+            tag="$tag.$slug"
+          fi
           {
             echo "sha=$sha"
             echo "short=${sha:0:12}"
-            tag="v$(date -u +%Y.%m.%d).${{ github.run_number }}"
             echo "tag=$tag"
             echo "image=$IMAGE:$tag"
           } >> "$GITHUB_OUTPUT"
