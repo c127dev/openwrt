@@ -88,7 +88,6 @@ jobs:
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
-      options: --user 1000
     steps:
       - name: Free runner disk
         run: df -h /
@@ -101,20 +100,28 @@ jobs:
         with:
           path: .packaging
 
-      - name: Feeds
+      # The actions run as root because the runner owns /__w as root.
+      # Buildroot refuses to run as root, so make runs as build.
+      - name: Hand the tree to the build user
         run: |
           set -euo pipefail
-          git config --global --add safe.directory "$PWD"
+          git config --global --add safe.directory '*'
+          chown -R build:build "$PWD"
+
+      - name: Feeds
+        run: |
+          su build -s /bin/bash -c 'set -euo pipefail
+          git config --global --add safe.directory "*"
           ./scripts/feeds update -a
-          ./scripts/feeds install -a
+          ./scripts/feeds install -a'
 
       - name: Config
         run: |
-          set -euo pipefail
+          su build -s /bin/bash -c 'set -euo pipefail
           cp ".packaging/configs/${{ inputs.config }}" .config
           make defconfig
           ./scripts/diffconfig.sh > config.effective
-          diff -u ".packaging/configs/${{ inputs.config }}" config.effective || true
+          diff -u ".packaging/configs/${{ inputs.config }}" config.effective || true'
 
       - uses: actions/cache@v4
         with:
@@ -122,14 +129,16 @@ jobs:
           key: dl-${{ inputs.config }}-${{ needs.plan.outputs.short }}
           restore-keys: dl-${{ inputs.config }}-
 
+      - name: Own the restored download cache
+        run: chown -R build:build dl 2>/dev/null || true
+
       - name: Download sources
-        run: make -j"$(nproc)" download
+        run: su build -s /bin/bash -c 'make -j"$(nproc)" download'
 
       - name: Build
-        run: make -j"$(nproc)" || make -j1 V=s
+        run: su build -s /bin/bash -c 'make -j"$(nproc)" || make -j1 V=s'
 
       - name: Collect images
-        id: out
         run: |
           set -euo pipefail
           mkdir -p out
