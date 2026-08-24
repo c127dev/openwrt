@@ -139,10 +139,13 @@ jobs:
           git config --global --add safe.directory '*'
           chown -R build:build "$PWD"
 
+      # The github mirrors clone far faster from a runner than
+      # git.openwrt.org does.
       - name: Feeds
         run: |
           su build -s /bin/bash -c 'set -euo pipefail
           git config --global --add safe.directory "*"
+          cp .packaging/configs/feeds.conf feeds.conf
           ./scripts/feeds update -a
           ./scripts/feeds install -a'
 
