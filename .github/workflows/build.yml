@@ -1,0 +1,163 @@
+name: build
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_ref:
+        description: Source branch or sha to build
+        default: mercusys-mr80x-v220-wired
+      config:
+        description: Config file under configs/
+        default: mr80x-v220-wired.diffconfig
+      release:
+        description: Publish a GitHub release with the images
+        type: boolean
+        default: true
+  push:
+    branches: [compiler]
+
+permissions:
+  contents: write
+  packages: write
+
+env:
+  IMAGE: ghcr.io/${{ github.repository_owner }}/openwrt-compiler
+
+jobs:
+  plan:
+    # A push only registers the workflow with the Actions API and stops here.
+    # Every other job needs plan, so they skip with it.
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    outputs:
+      sha: ${{ steps.p.outputs.sha }}
+      short: ${{ steps.p.outputs.short }}
+      tag: ${{ steps.p.outputs.tag }}
+      image: ${{ steps.p.outputs.image }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_ref }}
+          fetch-depth: 0
+
+      - id: p
+        run: |
+          set -euo pipefail
+          sha=$(git rev-parse HEAD)
+          {
+            echo "sha=$sha"
+            echo "short=${sha:0:12}"
+            tag="v$(date -u +%Y.%m.%d).${{ github.run_number }}"
+            echo "tag=$tag"
+            echo "image=$IMAGE:$tag"
+          } >> "$GITHUB_OUTPUT"
+
+  image:
+    needs: plan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: .packaging
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .packaging
+          file: .packaging/Dockerfile
+          push: true
+          tags: |
+            ${{ needs.plan.outputs.image }}
+            ${{ env.IMAGE }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  firmware:
+    needs: [plan, image]
+    runs-on: ubuntu-latest
+    container:
+      image: ${{ needs.plan.outputs.image }}
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+      options: --user 1000
+    steps:
+      - name: Free runner disk
+        run: df -h /
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.plan.outputs.sha }}
+
+      - uses: actions/checkout@v4
+        with:
+          path: .packaging
+
+      - name: Feeds
+        run: |
+          set -euo pipefail
+          git config --global --add safe.directory "$PWD"
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+
+      - name: Config
+        run: |
+          set -euo pipefail
+          cp ".packaging/configs/${{ inputs.config }}" .config
+          make defconfig
+          ./scripts/diffconfig.sh > config.effective
+          diff -u ".packaging/configs/${{ inputs.config }}" config.effective || true
+
+      - uses: actions/cache@v4
+        with:
+          path: dl
+          key: dl-${{ inputs.config }}-${{ needs.plan.outputs.short }}
+          restore-keys: dl-${{ inputs.config }}-
+
+      - name: Download sources
+        run: make -j"$(nproc)" download
+
+      - name: Build
+        run: make -j"$(nproc)" || make -j1 V=s
+
+      - name: Collect images
+        id: out
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          find bin/targets -type f \
+            \( -name '*sysupgrade*' -o -name '*factory*' -o -name 'sha256sums' \
+               -o -name '*.manifest' \) -exec cp -t out {} +
+          ls -l out
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: firmware-${{ needs.plan.outputs.short }}
+          path: out/
+          if-no-files-found: error
+
+  release:
+    needs: [plan, firmware]
+    if: inputs.release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: firmware-${{ needs.plan.outputs.short }}
+          path: out
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.plan.outputs.tag }}
+          target_commitish: ${{ needs.plan.outputs.sha }}
+          name: ${{ needs.plan.outputs.tag }}
+          body: |
+            Source: `${{ inputs.source_ref }}` at `${{ needs.plan.outputs.sha }}`
+            Config: `${{ inputs.config }}`
+            Image: `${{ needs.plan.outputs.image }}`
+          files: out/*
