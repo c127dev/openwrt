@@ -1,0 +1,35 @@
+From: Johan Alvarado <contact@c127.dev>
+Date: Wed, 26 Aug 2026 22:40:00 -0500
+Subject: [PATCH] arm64: dts: qcom: ipq5018: enable smp2p ssr ack
+
+The Q6 on IPQ5018 boots exactly once. Any later start - after a firmware
+crash or after a plain stop/start - fails with:
+
+  qcom-q6-mpd cd00000.remoteproc: start timed out
+  remoteproc remoteproc0: can't start rproc cd00000.remoteproc: -110
+
+qcom_scm_pas_auth_and_reset() returns 0 and the Q6 does come up: the
+smp2p master interrupt fires during the failed start. What never arrives
+is the "ready" edge, because the local side never acknowledges the
+remote restart, so its cached entry values are stale and setting "ready"
+again produces no transition.
+
+This is the same problem 8devices fixed for IPQ6018 in "soc: qcom: fix
+smp2p ack on ipq6018", which added qcom,smp2p-feature-ssr-ack to the
+master-kernel node and made qcom_smp2p_intr() send the ack when that
+property is present. The driver side already applies to every SoC; only
+the IPQ6018 device tree ever opted in. IPQ5018 needs the same property,
+and its smp2p node is otherwise identical.
+
+Signed-off-by: Johan Alvarado <contact@c127.dev>
+---
+--- a/arch/arm64/boot/dts/qcom/ipq5018.dtsi
++++ b/arch/arm64/boot/dts/qcom/ipq5018.dtsi
+@@ -1212,6 +1212,7 @@
+ 
+ 		wcss_smp2p_out: master-kernel {
+ 			qcom,entry-name = "master-kernel";
++			qcom,smp2p-feature-ssr-ack;
+ 			#qcom,smem-state-cells = <1>;
+ 		};
+ 
