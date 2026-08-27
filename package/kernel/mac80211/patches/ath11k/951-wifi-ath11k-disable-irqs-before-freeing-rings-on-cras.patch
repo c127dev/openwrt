@@ -1,0 +1,74 @@
+From: Johan Alvarado <contact@c127.dev>
+Date: Thu, 27 Aug 2026 00:20:00 -0500
+Subject: [PATCH] wifi: ath11k: disable irqs before freeing rings on crash
+ recovery
+
+ath11k_core_reconfigure_on_crash() frees the data path rings and clears
+the srngs, then calls ath11k_core_qmi_firmware_ready(), which re-enables
+the copy engine interrupts through ath11k_hif_start(). Nothing in this
+path ever disables those interrupts: the crash path does not run
+ath11k_core_stop(), which is the only caller of ath11k_hif_stop().
+
+So the interrupts stay live across the teardown. On IPQ5018 with a
+QCN6122, which uses the pcic irq ops, re-enabling them delivers a CE
+interrupt inside ath11k_pcic_ce_irqs_enable() itself, the NAPI poll runs
+against an srng that ath11k_hal_srng_clear() has already cleared, and the
+NULL dereference is fatal because it happens in interrupt context:
+
+  Unbalanced enable for IRQ 64
+  WARNING: CPU: 0 PID: 12 at kernel/irq/manage.c:774 __enable_irq+0x4c/0x7c
+  ...
+  Unable to handle kernel read from unreadable memory at virtual address 0
+  pc : ath11k_hal_srng_access_begin+0xc/0x60 [ath11k]
+  lr : ath11k_dp_rx_process_mon_status+0x150/0xe04 [ath11k]
+  Call trace:
+   ath11k_dp_rx_process_mon_rings+0x8c/0x5ec [ath11k]
+   ath11k_dp_service_srng+0x1f4/0x358 [ath11k]
+   ath11k_ahb_ext_grp_napi_poll+0x34/0xc8 [ath11k_ahb]
+   ...
+   ath11k_pcic_ce_irqs_enable+0x78/0x9c [ath11k]
+   ath11k_pcic_start+0x34/0x5c [ath11k]
+   ath11k_core_qmi_firmware_ready+0x104/0x584 [ath11k]
+   ath11k_core_restart+0xb4/0x144 [ath11k]
+  Kernel panic - not syncing: Oops: Fatal exception in interrupt
+
+This only became reachable once subsystem restart started working on
+IPQ5018; before that the Q6 never came back, so the recovery path was
+never exercised.
+
+Disable the ext and CE interrupts, and with them NAPI, before the rings
+are torn down. That also removes the unbalanced enable, since the crash
+path now has the disable that matches the enable in ath11k_hif_start().
+
+Signed-off-by: Johan Alvarado <contact@c127.dev>
+---
+--- a/drivers/net/wireless/ath/ath11k/core.c
++++ b/drivers/net/wireless/ath/ath11k/core.c
+@@ -2365,6 +2365,27 @@
+ {
+ 	int ret;
+ 
++	/*
++	 * The firmware is gone, but the data path interrupts are still live:
++	 * this path never runs ath11k_core_stop(), so nothing has disabled
++	 * them. Shut the ext interrupts and NAPI down before the rings are
++	 * freed below, otherwise a DP interrupt taken while
++	 * ath11k_core_qmi_firmware_ready() re-enables the copy engine runs the
++	 * NAPI poll against an srng that ath11k_hal_srng_clear() has already
++	 * cleared, and the NULL dereference is fatal in interrupt context:
++	 *
++	 *   pc : ath11k_hal_srng_access_begin+0xc/0x60 [ath11k]
++	 *   lr : ath11k_dp_rx_process_mon_status+0x150/0xe04 [ath11k]
++	 *   Kernel panic - not syncing: Oops: Fatal exception in interrupt
++	 *
++	 * Only on a real crash: this function also runs for the cold boot
++	 * calibration restart, where the interrupts were never enabled, and
++	 * disabling them there leaves them disabled through the following
++	 * enable, so the radio never takes another interrupt.
++	 */
++	if (test_bit(ATH11K_FLAG_RECOVERY, &ab->dev_flags))
++		ath11k_hif_irq_disable(ab);
++
+ 	mutex_lock(&ab->core_lock);
+ 	ath11k_thermal_unregister(ab);
+ 	ath11k_dp_pdev_free(ab);
