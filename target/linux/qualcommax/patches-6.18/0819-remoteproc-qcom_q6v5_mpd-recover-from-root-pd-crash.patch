@@ -1,0 +1,233 @@
+From: Johan Alvarado <contact@c127.dev>
+Date: Wed, 26 Aug 2026 20:10:00 -0500
+Subject: [PATCH] remoteproc: qcom_q6v5_mpd: recover from a root PD crash
+
+On IPQ5018 the WCSS firmware reports a user PD assertion as a root PD
+fatal and never raises the user PD fatal bits, so every wifi firmware
+crash takes the root PD path:
+
+  qcom-q6-mpd cd00000.remoteproc: fatal error received: err_smem_ver.2.1:
+    wlan_wmi.c:692 Assertion 0 failed
+    Thread name : WLAN RT0  Process name :wlan1
+  remoteproc remoteproc0: recovering cd00000.remoteproc
+  remoteproc remoteproc0: stopped remote processor cd00000.remoteproc
+  qcom-q6-mpd cd00000.remoteproc: start timed out
+  remoteproc remoteproc0: can't start rproc cd00000.remoteproc: -110
+
+Recovering the root PD in place cannot work. rproc_boot_recovery() stops
+it and immediately re-authenticates it, but qcom_scm_pas_auth_and_reset()
+times out while the user PDs still hold their MSA locks - those are only
+released by wcss_pd_stop(), which never ran because nothing marked the
+user PDs as gone. The user PDs are then stuck: wcss_pd_stop() needs a
+live Q6 to ack the stop over smp2p, so they can no longer be stopped at
+all and ath11k spins on -108 until the board is rebooted.
+
+Handle the root PD fatal and watchdog locally instead: stop every running
+user PD, then start them again. The two passes are required because the
+user PDs share one power reference on the root PD, so all of them must be
+stopped before any is restarted, otherwise the reference never reaches
+zero, the Q6 is never reset and the user PD spawn times out instead.
+
+ath11k needs no change - the Q6 going down and coming back drives its QMI
+del_server/new_server path, which rebuilds the device.
+
+Signed-off-by: Johan Alvarado <contact@c127.dev>
+---
+--- a/drivers/remoteproc/qcom_q6v5_mpd.c
++++ b/drivers/remoteproc/qcom_q6v5_mpd.c
+@@ -21,6 +21,7 @@
+ #include <linux/soc/qcom/mdt_loader.h>
+ #include <linux/soc/qcom/smem.h>
+ #include <linux/soc/qcom/smem_state.h>
++#include <linux/workqueue.h>
+ #include "qcom_common.h"
+ #include "qcom_q6v5.h"
+ 
+@@ -87,6 +88,7 @@
+ 	const struct wcss_data *desc;
+ 	const char **firmware;
+ 	struct userpd *upd[MAX_UPD];
++	struct work_struct crash_work;
+ };
+ 
+ struct userpd {
+@@ -195,10 +197,19 @@
+ 	const struct wcss_data *desc = wcss->desc;
+ 	int ret;
+ 
+-	ret = qcom_q6v5_request_stop(&wcss->q6, NULL);
+-	if (ret) {
+-		dev_err(wcss->dev, "pd not stopped\n");
+-		return ret;
++	/*
++	 * A crashed Q6 can no longer ack the stop request over smp2p, which
++	 * would leave this timing out for no reason. The crash handler has
++	 * already cleared ->running in that case.
++	 */
++	if (wcss->q6.running) {
++		ret = qcom_q6v5_request_stop(&wcss->q6, NULL);
++		if (ret) {
++			dev_err(wcss->dev, "pd not stopped\n");
++			return ret;
++		}
++
++		wcss->q6.running = false;
+ 	}
+ 
+ 	ret = qcom_scm_pas_shutdown(desc->pasid);
+@@ -244,7 +255,7 @@
+ 	u32 pasid = (upd->pd_asid << 8) | UPD_SWID;
+ 	int ret;
+ 
+-	if (rproc->state != RPROC_CRASHED && upd->q6.stop_bit) {
++	if (rproc->state != RPROC_CRASHED && upd->q6.running && upd->q6.stop_bit) {
+ 		ret = qcom_q6v5_request_stop(&upd->q6, NULL);
+ 		if (ret) {
+ 			dev_err(upd->dev, "pd not stopped\n");
+@@ -754,6 +765,103 @@
+ 	return ret;
+ }
+ 
++/**
++ * q6_rootpd_recover_work() - restart the Q6 after a root PD crash
++ * @work:	root PD crash work
++ *
++ * The root PD cannot be recovered in place. rproc_boot_recovery() stops it and
++ * immediately re-authenticates it with qcom_scm_pas_auth_and_reset(), which
++ * fails with -ETIMEDOUT for as long as the user PDs still hold their MSA
++ * locks. Those are only dropped by wcss_pd_stop(), which never runs because
++ * nothing marks the user PDs as gone: this firmware reports a user PD
++ * assertion as a root PD fatal and never raises the user PD fatal bits.
++ *
++ * So tear the user PDs down first and bring them back afterwards. This has to
++ * happen in two passes: the user PDs share one power reference on the root PD,
++ * so every user PD must be stopped before any of them is started again -
++ * otherwise that reference never drops to zero, the Q6 is never reset, and the
++ * user PD spawn times out instead.
++ */
++static void q6_rootpd_recover_work(struct work_struct *work)
++{
++	struct q6_wcss *wcss = container_of(work, struct q6_wcss, crash_work);
++	bool was_running[MAX_UPD] = {};
++	struct userpd *upd;
++	int ret, i;
++
++	/* Pass one: stop every user PD that was up, releasing the root PD. */
++	for (i = 0; i < MAX_UPD; i++) {
++		upd = wcss->upd[i];
++		if (!upd || upd->q6.rproc->state != RPROC_RUNNING)
++			continue;
++
++		was_running[i] = true;
++		upd->q6.running = false;
++		ret = rproc_shutdown(upd->q6.rproc);
++		if (ret)
++			dev_err(upd->dev, "failed to stop after root pd crash: %d\n",
++				ret);
++	}
++
++	/* Pass two: start them again; the first one boots the Q6. */
++	for (i = 0; i < MAX_UPD; i++) {
++		if (!was_running[i])
++			continue;
++
++		upd = wcss->upd[i];
++		ret = rproc_boot(upd->q6.rproc);
++		if (ret)
++			dev_err(upd->dev,
++				"failed to restart after root pd crash: %d\n",
++				ret);
++	}
++}
++
++static irqreturn_t q6_rootpd_fatal_interrupt(int irq, void *data)
++{
++	struct q6_wcss *wcss = data;
++	size_t len;
++	char *msg;
++
++	if (!wcss->q6.running)
++		return IRQ_HANDLED;
++
++	msg = qcom_smem_get(QCOM_SMEM_HOST_ANY, wcss->q6.crash_reason, &len);
++	if (!IS_ERR(msg) && len > 0 && msg[0])
++		dev_err(wcss->dev, "fatal error received: %s\n", msg);
++	else
++		dev_err(wcss->dev, "fatal error without message\n");
++
++	wcss->q6.running = false;
++	schedule_work(&wcss->crash_work);
++
++	return IRQ_HANDLED;
++}
++
++static irqreturn_t q6_rootpd_wdog_interrupt(int irq, void *data)
++{
++	struct q6_wcss *wcss = data;
++	size_t len;
++	char *msg;
++
++	/* Sometimes the stop triggers a watchdog rather than a stop-ack */
++	if (!wcss->q6.running) {
++		complete(&wcss->q6.stop_done);
++		return IRQ_HANDLED;
++	}
++
++	msg = qcom_smem_get(QCOM_SMEM_HOST_ANY, wcss->q6.crash_reason, &len);
++	if (!IS_ERR(msg) && len > 0 && msg[0])
++		dev_err(wcss->dev, "watchdog received: %s\n", msg);
++	else
++		dev_err(wcss->dev, "watchdog without message\n");
++
++	wcss->q6.running = false;
++	schedule_work(&wcss->crash_work);
++
++	return IRQ_HANDLED;
++}
++
+ static int q6_wcss_probe(struct platform_device *pdev)
+ {
+ 	struct q6_wcss *wcss;
+@@ -802,6 +910,34 @@
+ 	if (ret)
+ 		goto free_rproc;
+ 
++	INIT_WORK(&wcss->crash_work, q6_rootpd_recover_work);
++
++	/*
++	 * Take over the fatal and watchdog interrupts from qcom_q6v5_init().
++	 * Its handlers report the crash on the root PD itself, which makes
++	 * the rproc core recover it in place - that can never succeed while
++	 * the user PDs are still up. See q6_rootpd_recover_work().
++	 */
++	devm_free_irq(&pdev->dev, wcss->q6.fatal_irq, &wcss->q6);
++	ret = devm_request_threaded_irq(&pdev->dev, wcss->q6.fatal_irq, NULL,
++					q6_rootpd_fatal_interrupt,
++					IRQF_TRIGGER_RISING | IRQF_ONESHOT,
++					"q6v5 fatal", wcss);
++	if (ret) {
++		dev_err(&pdev->dev, "failed to acquire fatal IRQ\n");
++		goto free_rproc;
++	}
++
++	devm_free_irq(&pdev->dev, wcss->q6.wdog_irq, &wcss->q6);
++	ret = devm_request_threaded_irq(&pdev->dev, wcss->q6.wdog_irq, NULL,
++					q6_rootpd_wdog_interrupt,
++					IRQF_TRIGGER_RISING | IRQF_ONESHOT,
++					"q6v5 wdog", wcss);
++	if (ret) {
++		dev_err(&pdev->dev, "failed to acquire wdog IRQ\n");
++		goto free_rproc;
++	}
++
+ 	qcom_add_glink_subdev(rproc, &wcss->glink_subdev, "q6wcss");
+ 	qcom_add_ssr_subdev(rproc, &wcss->ssr_subdev, "q6wcss");
+ 
+@@ -836,6 +972,7 @@
+ 	struct rproc *rproc = platform_get_drvdata(pdev);
+ 	struct q6_wcss *wcss = rproc->priv;
+ 
++	cancel_work_sync(&wcss->crash_work);
+ 	qcom_q6v5_deinit(&wcss->q6);
+ 
+ 	rproc_del(rproc);
