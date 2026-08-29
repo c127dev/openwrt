@@ -1,6 +1,7 @@
 CONFIG_TARGET_qualcommax=y
 CONFIG_TARGET_qualcommax_ipq50xx=y
-CONFIG_TARGET_qualcommax_ipq50xx_DEVICE_mercusys_mr80x=y
+CONFIG_TARGET_qualcommax_ipq50xx_DEVICE_mercusys_mr80x-v2=y
+CONFIG_TARGET_PROFILE="DEVICE_mercusys_mr80x-v2"
 CONFIG_DEVEL=y
 CONFIG_BUSYBOX_CUSTOM=y
 CONFIG_BUSYBOX_CONFIG_DEVMEM=y
