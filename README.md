@@ -35,7 +35,36 @@ curl -X POST \
 204 means accepted. Token: fine-grained, this repo, Actions read and write.
 
 Inputs: `source_ref` (branch or sha), `config` (file under `configs/`),
-`release` (attach the images to a GitHub release, default true).
+`release` (attach the images to a GitHub release, default true),
+`imagebuilder` (default true), `all_kmods` (default true), `sdk`
+(default false).
+
+## Adding packages to a released image
+
+The release carries `openwrt-imagebuilder-*.tar.zst`. On x86_64 Linux:
+
+```bash
+tar xf openwrt-imagebuilder-*.tar.zst
+cd openwrt-imagebuilder-*
+make info
+make image PROFILE=mercusys_mr80x-v2 \
+    PACKAGES="sqm-scripts luci-app-sqm tc-full kmod-sched-cake"
+```
+
+It selects from packages already built, so `all_kmods` decides whether an
+arbitrary kmod is available. It compiles nothing; a package that needs
+building needs the SDK instead.
+
+`openwrt-packages-<tag>.tar.zst` unpacks into an apk feed. The image carries
+the key that signed it, so only the URL has to be added:
+
+```
+echo https://example/packages/aarch64_cortex-a53/base/packages.adb \
+    >> /etc/apk/repositories.d/customfeeds.list
+```
+
+Packages installed that way live in the overlay and do not survive
+sysupgrade. Rolling them into the image does.
 
 The image is pushed to `ghcr.io/c127dev/openwrt-compiler`. Release tags are
 `vYYYY.MM.DD.<run>`, UTC.
@@ -60,4 +89,7 @@ Then dispatch with `config=<name>.diffconfig`.
   builds.
 - A full single-device build needs roughly 25 GB. The hosted runner has
   little margin over that; a disk-full failure shows up as a link error deep
-  in the toolchain.
+  in the toolchain. `all_kmods` and `sdk` both add to that, and the host's
+  own free space cannot be reclaimed from a container job, so the usual
+  runner-cleanup steps do not apply here. Turn them off per dispatch if a
+  build dies without naming a cause, and compare the two `df -h /` steps.

@@ -13,6 +13,18 @@ on:
         description: Publish a GitHub release with the images
         type: boolean
         default: true
+      imagebuilder:
+        description: Build the ImageBuilder tarball
+        type: boolean
+        default: true
+      all_kmods:
+        description: Build every kernel module package
+        type: boolean
+        default: true
+      sdk:
+        description: Build the SDK tarball
+        type: boolean
+        default: false
   push:
     branches: [compiler]
 
@@ -137,7 +149,10 @@ jobs:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
     steps:
-      - name: Free runner disk
+      # Running out of disk fails deep in the toolchain and never says so.
+      # The host's own free space cannot be reclaimed from a container job,
+      # so this only records the starting margin.
+      - name: Disk
         run: df -h /
 
       - uses: actions/checkout@v4
@@ -166,10 +181,37 @@ jobs:
           ./scripts/feeds update -a
           ./scripts/feeds install -a'
 
+      # The config file names the device and its packages. What the dispatch
+      # adds here is what to emit besides the image, so a user can compose
+      # their own image without this toolchain.
       - name: Config
+        env:
+          WANT_IB: ${{ inputs.imagebuilder }}
+          WANT_SDK: ${{ inputs.sdk }}
+          WANT_ALL_KMODS: ${{ inputs.all_kmods }}
         run: |
-          su build -s /bin/bash -c 'set -euo pipefail
+          set -euo pipefail
           cp ".packaging/configs/${{ inputs.config }}" .config
+          {
+            # Delete each build directory once it has compiled. The runner
+            # has little disk margin and nothing here rebuilds incrementally.
+            echo 'CONFIG_AUTOREMOVE=y'
+            if [ "$WANT_IB" = true ]; then
+              echo 'CONFIG_IB=y'
+              # Embed the packages instead of fetching them from
+              # downloads.openwrt.org, whose kmods are built against a
+              # different kernel and will not resolve against ours.
+              echo 'CONFIG_IB_STANDALONE=y'
+            fi
+            if [ "$WANT_SDK" = true ]; then
+              echo 'CONFIG_SDK=y'
+            fi
+            if [ "$WANT_ALL_KMODS" = true ]; then
+              echo 'CONFIG_ALL_KMODS=y'
+            fi
+          } >> .config
+          chown build:build .config
+          su build -s /bin/bash -c 'set -euo pipefail
           make defconfig
           ./scripts/diffconfig.sh > config.effective
           diff -u ".packaging/configs/${{ inputs.config }}" config.effective || true'
@@ -193,6 +235,34 @@ jobs:
           fi
           echo "profile $got"
 
+      # A dependency the tree does not satisfy leaves the symbol out of
+      # .config and the tarball is simply never built, with nothing in the
+      # log to say so.
+      - name: Check the requested outputs survived defconfig
+        env:
+          WANT_IB: ${{ inputs.imagebuilder }}
+          WANT_SDK: ${{ inputs.sdk }}
+          WANT_ALL_KMODS: ${{ inputs.all_kmods }}
+        run: |
+          set -euo pipefail
+          fail=0
+          check() {
+            if [ "$2" != true ]; then
+              return 0
+            fi
+            if grep -qx "CONFIG_$1=y" .config; then
+              echo "CONFIG_$1=y"
+            else
+              echo "requested CONFIG_$1, defconfig dropped it" >&2
+              fail=1
+            fi
+          }
+          check IB "$WANT_IB"
+          check IB_STANDALONE "$WANT_IB"
+          check SDK "$WANT_SDK"
+          check ALL_KMODS "$WANT_ALL_KMODS"
+          exit $fail
+
       - uses: actions/cache@v4
         with:
           path: dl
@@ -208,6 +278,12 @@ jobs:
       - name: Build
         run: su build -s /bin/bash -c 'make -j"$(nproc)" || make -j1 V=s'
 
+      # Signed with the key this build generated, which is also the key the
+      # image carries in /etc/apk/keys, so the tree serves as a feed for the
+      # image it shipped with.
+      - name: Package index
+        run: su build -s /bin/bash -c 'make package/index'
+
       - name: Collect images
         run: |
           set -euo pipefail
@@ -216,6 +292,35 @@ jobs:
             \( -name '*sysupgrade*' -o -name '*factory*' -o -name 'sha256sums' \
                -o -name '*.manifest' \) -exec cp -t out {} +
           ls -l out
+
+      - name: Collect ImageBuilder and SDK
+        run: |
+          set -euo pipefail
+          find bin/targets -type f \
+            \( -name 'openwrt-imagebuilder-*.tar.*' \
+               -o -name 'openwrt-sdk-*.tar.*' \) -exec cp -t out {} +
+          ls -l out
+
+      # One asset rather than several hundred loose .apk files. Unpacked
+      # under a web root it is an apk feed; the layout is what apk expects.
+      - name: Collect packages
+        env:
+          TAG: ${{ needs.plan.outputs.tag }}
+        run: |
+          set -euo pipefail
+          # -prune so a feed directory nested under bin/packages is not
+          # archived a second time on its own.
+          dirs=$(cd bin && find . -type d -name packages -prune | sed 's|^\./||')
+          if [ -z "$dirs" ]; then
+            echo "no package directories under bin" >&2
+            exit 1
+          fi
+          tar -C bin -caf "out/openwrt-packages-$TAG.tar.zst" $dirs
+          ls -l out
+
+      - name: Disk after build
+        if: always()
+        run: df -h /
 
       - uses: actions/upload-artifact@v4
         with:
@@ -242,4 +347,14 @@ jobs:
             Source: `${{ inputs.source_ref }}` at `${{ needs.plan.outputs.sha }}`
             Config: `${{ inputs.config }}`
             Image: `${{ needs.plan.outputs.image }}`
+
+            Add packages without this toolchain, on x86_64 Linux:
+
+            ```
+            tar xf openwrt-imagebuilder-*.tar.zst && cd openwrt-imagebuilder-*
+            make image PROFILE=mercusys_mr80x-v2 PACKAGES="sqm-scripts luci-app-sqm tc-full kmod-sched-cake"
+            ```
+
+            `make info` lists the profiles and the default package set.
+            Testing builds, not upstream OpenWrt.
           files: out/*
