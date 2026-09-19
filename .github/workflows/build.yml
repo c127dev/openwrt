@@ -187,18 +187,19 @@ jobs:
       # add a file under feeds/. Each one is dry-run first and skipped
       # whole if it does not apply, so a patch that upstream has since
       # merged costs a log line and nothing else.
+      # A container job runs this under the image's sh, which is dash, so
+      # no arrays and no shopt.
       - name: Custom patches
         run: |
-          set -uo pipefail
-          shopt -s nullglob
-          list=(.packaging/patches/*.patch)
-          if [ ${#list[@]} -eq 0 ]; then
-            echo "no custom patches"
-            exit 0
-          fi
-          echo "| patch | result |" >> "$GITHUB_STEP_SUMMARY"
-          echo "| --- | --- |" >> "$GITHUB_STEP_SUMMARY"
-          for p in "${list[@]}"; do
+          set -u
+          found=0
+          for p in .packaging/patches/*.patch; do
+            [ -e "$p" ] || continue
+            if [ "$found" = 0 ]; then
+              found=1
+              echo "| patch | result |" >> "$GITHUB_STEP_SUMMARY"
+              echo "| --- | --- |" >> "$GITHUB_STEP_SUMMARY"
+            fi
             name=$(basename "$p")
             if su build -s /bin/bash -c "patch -p1 -N --dry-run -i $PWD/$p" >/dev/null 2>&1; then
               su build -s /bin/bash -c "patch -p1 -N -i $PWD/$p"
@@ -209,6 +210,7 @@ jobs:
               echo "| \`$name\` | skipped |" >> "$GITHUB_STEP_SUMMARY"
             fi
           done
+          [ "$found" = 1 ] || echo "no custom patches"
 
       # The config file names the device and its packages. What the dispatch
       # adds here is what to emit besides the image, so a user can compose
