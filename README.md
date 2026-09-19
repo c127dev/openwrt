@@ -73,6 +73,24 @@ Set repository secrets `DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN` to also
 push `docker.io/<user>/openwrt-compiler`. With either unset the step logs
 `ghcr.io only` and the run continues.
 
+## Custom patches
+
+Every `patches/*.patch` is applied at the tree root with `patch -p1`, in
+name order, after the feeds are installed and before `make defconfig`.
+A patch may therefore touch buildroot, a source branch file, or a feed -
+including adding a file to a feed's own `patches/` directory.
+
+A patch that does not apply cleanly is skipped whole and the build
+continues; the job summary lists each one as applied or skipped. That is
+the point of this directory: it holds fixes that are not on any source
+branch and not yet upstream, so one going stale must not break a build.
+
+Local runs do not apply them. To match CI:
+
+```bash
+for p in .packaging/patches/*.patch; do patch -p1 -N -i "$p"; done
+```
+
 ## Adding a config
 
 ```bash

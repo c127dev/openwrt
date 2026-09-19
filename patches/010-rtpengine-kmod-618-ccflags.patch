@@ -1,0 +1,30 @@
+rtpengine: fix kernel module build on 6.18
+
+EXTRA_CFLAGS is gone from kbuild, so -D__RE_EXTERNAL never reaches gcc
+and the module includes a kernel header that does not exist.
+
+--- /dev/null
++++ b/feeds/telephony/net/rtpengine/patches/105-kernel-module-use-ccflags-y.patch
+@@ -0,0 +1,22 @@
++kernel-module: use ccflags-y instead of EXTRA_CFLAGS
++
++Kbuild dropped EXTRA_CFLAGS support in Linux 6.18, so -D__RE_EXTERNAL never
++reached the compiler and xt_RTPENGINE.c fell back to including
++<linux/netfilter/xt_RTPENGINE.h>, which does not exist in the kernel tree:
++
++  xt_RTPENGINE.c:39:10: fatal error: linux/netfilter/xt_RTPENGINE.h: No such file or directory
++
++--- a/kernel-module/Makefile
+++++ b/kernel-module/Makefile
++@@ -22,9 +22,9 @@ ifeq ($(RTPENGINE_VERSION),)
++     RTPENGINE_VERSION+=undefined
++   endif
++ endif
++-EXTRA_CFLAGS+=	-DRTPENGINE_VERSION="\"$(RTPENGINE_VERSION)\""
+++ccflags-y +=	-DRTPENGINE_VERSION="\"$(RTPENGINE_VERSION)\""
++ 
++-EXTRA_CFLAGS += -D__RE_EXTERNAL
+++ccflags-y += -D__RE_EXTERNAL
++ 
++ obj-m        += xt_RTPENGINE.o
++ 

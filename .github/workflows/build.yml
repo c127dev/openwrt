@@ -181,6 +181,35 @@ jobs:
           ./scripts/feeds update -a
           ./scripts/feeds install -a'
 
+      # Fixes that live neither on the source branch nor upstream: build
+      # breakage in a feed, a kernel change no package has caught up with.
+      # Applied at the tree root after the feeds exist, so a patch can also
+      # add a file under feeds/. Each one is dry-run first and skipped
+      # whole if it does not apply, so a patch that upstream has since
+      # merged costs a log line and nothing else.
+      - name: Custom patches
+        run: |
+          set -uo pipefail
+          shopt -s nullglob
+          list=(.packaging/patches/*.patch)
+          if [ ${#list[@]} -eq 0 ]; then
+            echo "no custom patches"
+            exit 0
+          fi
+          echo "| patch | result |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| --- | --- |" >> "$GITHUB_STEP_SUMMARY"
+          for p in "${list[@]}"; do
+            name=$(basename "$p")
+            if su build -s /bin/bash -c "patch -p1 -N --dry-run -i $PWD/$p" >/dev/null 2>&1; then
+              su build -s /bin/bash -c "patch -p1 -N -i $PWD/$p"
+              echo "applied $name"
+              echo "| \`$name\` | applied |" >> "$GITHUB_STEP_SUMMARY"
+            else
+              echo "skipped $name, does not apply"
+              echo "| \`$name\` | skipped |" >> "$GITHUB_STEP_SUMMARY"
+            fi
+          done
+
       # The config file names the device and its packages. What the dispatch
       # adds here is what to emit besides the image, so a user can compose
       # their own image without this toolchain.
